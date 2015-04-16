@@ -1,7 +1,9 @@
 package org.ggp.base.util.propnet.architecture;
 
 import java.io.Serializable;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -15,17 +17,24 @@ public abstract class Component implements Serializable
 
 	private static final long serialVersionUID = 352524175700224447L;
     /** The inputs to the component. */
-    private final Set<Component> inputs;
+    private final List<Component> inputs;
     /** The outputs of the component. */
-    private final Set<Component> outputs;
+    private final List<Component> outputs;
+
+    /* The bitset for this component */
+    protected BitSet curstate = null;
+
+	public int index;
+	public int topological_index;
 
     /**
      * Creates a new Component with no inputs or outputs.
      */
     public Component()
     {
-        this.inputs = new HashSet<Component>();
-        this.outputs = new HashSet<Component>();
+        this.inputs = new ArrayList<Component>();
+        this.outputs = new ArrayList<Component>();
+        this.topological_index = 0;
     }
 
     /**
@@ -75,7 +84,7 @@ public abstract class Component implements Serializable
      *
      * @return The inputs to the component.
      */
-    public Set<Component> getInputs()
+    public List<Component> getInputs()
     {
         return inputs;
     }
@@ -97,7 +106,7 @@ public abstract class Component implements Serializable
      *
      * @return The outputs of the component.
      */
-    public Set<Component> getOutputs()
+    public List<Component> getOutputs()
     {
         return outputs;
     }
@@ -140,7 +149,7 @@ public abstract class Component implements Serializable
      *            The value to use as the <tt>label</tt> attribute.
      * @return A representation of the Component in .dot format.
      */
-    protected String toDot(String shape, String fillcolor, String label)
+    protected String helptoDot(String shape, String fillcolor, String label)
     {
         StringBuilder sb = new StringBuilder();
 
@@ -153,4 +162,42 @@ public abstract class Component implements Serializable
         return sb.toString();
     }
 
+    public abstract String toDotFormat();
+
+    public abstract void printTree(int indent);
+
+    public String makeindent(int length)
+    {
+    	StringBuffer outputBuffer = new StringBuffer(length);
+    	for (int i = 0; i < length; i++){
+    	   outputBuffer.append(" ");
+    	}
+    	return outputBuffer.toString();
+    }
+
+    public abstract void augmentBitSets(BitSet current_state, BitSet next_state);
+
+	public void setIndex(int index_to_set)
+	{
+		//GamerLogger.emitToConsole("Component '" + this.toString() + "' is index " + index_to_set + "\n");
+		this.index = index_to_set;
+	}
+
+	public void setTopoIndex(int index_to_set)
+	{
+		//GamerLogger.emitToConsole("Component '" + this.toString() + "' is index " + index_to_set + "\n");
+		this.topological_index = index_to_set;
+	}
+
+	public void update_and_fprop(Set<Component> worklist)
+	{
+		update_and_fprop(worklist, null, false);
+	}
+
+	/**
+	 * Should never be propping a component which is already in the checkset
+	 * @param worklist
+	 * @param checkset
+	 */
+	public abstract void update_and_fprop(Set<Component> worklist, Set<Component> checkset, boolean tracing);
 }

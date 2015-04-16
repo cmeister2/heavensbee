@@ -3,11 +3,17 @@ package org.ggp.base.util.propnet.architecture;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import org.ggp.base.util.gdl.grammar.GdlConstant;
 import org.ggp.base.util.gdl.grammar.GdlPool;
@@ -17,12 +23,23 @@ import org.ggp.base.util.gdl.grammar.GdlSentence;
 import org.ggp.base.util.gdl.grammar.GdlTerm;
 import org.ggp.base.util.logging.GamerLogger;
 import org.ggp.base.util.propnet.architecture.components.And;
+import org.ggp.base.util.propnet.architecture.components.Constant;
 import org.ggp.base.util.propnet.architecture.components.Not;
 import org.ggp.base.util.propnet.architecture.components.Or;
 import org.ggp.base.util.propnet.architecture.components.Proposition;
 import org.ggp.base.util.propnet.architecture.components.Transition;
+import org.ggp.base.util.propnet.architecture.components.VisitorComp;
+import org.ggp.base.util.statemachine.MachineState;
 import org.ggp.base.util.statemachine.Role;
+import org.ggp.base.util.statemachine.implementation.heavensbeepropnet.HeavensbeeMachineState;
 
+
+class TopologicalComparator implements Comparator<Component> {
+    @Override
+	public int compare(Component c1, Component c2) {
+        return c1.topological_index - c2.topological_index;
+    }
+}
 
 /**
  * The PropNet class is designed to represent Propositional Networks.
@@ -69,7 +86,7 @@ import org.ggp.base.util.statemachine.Role;
 public final class PropNet
 {
 	/** References to every component in the PropNet. */
-	private final Set<Component> components;
+	private Set<Component> components;
 
 	/** References to every Proposition in the PropNet. */
 	private final Set<Proposition> propositions;
@@ -98,11 +115,32 @@ public final class PropNet
 	/** A helper list of all of the roles. */
 	private final List<Role> roles;
 
-	public void addComponent(Component c)
-	{
-		components.add(c);
-		if (c instanceof Proposition) propositions.add((Proposition)c);
-	}
+	/** Propcounter to index propositions */
+	private int compcounter;
+
+	/** BitSets to represent current state and next state */
+	public BitSet current_state;
+	public BitSet next_state;
+
+	/** Visitor component to link together all reachable nodes */
+	private Component visitor_root;
+
+	/** Reverse postordering */
+	private List<Component> topological_ordering;
+
+	/** References to every Component in the PropNet, indexed by index. */
+	private final Map<Integer, Component> idx_comps;
+
+	/**
+	 * Pristine BitSet state.  This is the state of the machine at the end
+	 * of the initial propagation, where all the Nots and Constants have been
+	 * propagated and no BaseProposition, input propositions or the init
+	 * proposition have been set.  We use this pristine state at the start
+	 * of some functions.
+	 */
+	private BitSet pristine_state;
+
+	private String dot_timestamp;
 
 	/**
 	 * Creates a new PropNet from a list of Components, along with indices over
@@ -113,17 +151,274 @@ public final class PropNet
 	 */
 	public PropNet(List<Role> roles, Set<Component> components)
 	{
+		dot_timestamp = "E:/ggplogs/" + System.currentTimeMillis();
 
+		/* Set up the roles and components */
 	    this.roles = roles;
 		this.components = components;
+
+		renderToFile(dot_timestamp + "_original.dot");
+
+		/**
+		 * Before starting calculation, try doing some pruning.
+		 */
+		remove_single_output_view_props();
+		find_non_connected_components();
+
+		/**
+		 * Continue setup
+		 */
+		this.visitor_root = new VisitorComp();
+		this.idx_comps = new HashMap<Integer, Component>();
+
+		/* Set up bit states for current and next */
+		current_state = new BitSet();
+		next_state = new BitSet();
+
+		/* Set up propositions */
+		compcounter = 0;
 		this.propositions = recordPropositions();
+
+		/* Do base propositions first */
 		this.basePropositions = recordBasePropositions();
+
+		/* Do input propositions next */
 		this.inputPropositions = recordInputPropositions();
+
+		/* Setup the remaining indices */
+		setupRemainingIndices();
+
+		/* Carry on recording props */
 		this.legalPropositions = recordLegalPropositions();
 		this.goalPropositions = recordGoalPropositions();
 		this.initProposition = recordInitProposition();
 		this.terminalProposition = recordTerminalProposition();
 		this.legalInputMap = makeLegalInputMap();
+
+		/* Set up the visitor root to make visiting the nodes easy */
+		setupVisitorRoot();
+
+		/* Actually do the visitation */
+		setupVisitationList();
+
+		/* Augment the components so they're running on BitSets */
+		augmentComponents();
+
+		/* Do the initial propagation so that we are in the pristine state */
+		initial_propagate();
+	}
+
+	private void remove_single_output_view_props() {
+		/**
+		 * We do not need single output view props.
+		 */
+		int removed_components = 0;
+
+		List<Component> to_remove = new LinkedList<Component>();
+
+		for (Component c: components)
+		{
+			if (c instanceof Proposition)
+			{
+				Proposition p = (Proposition) c;
+				if (p.isViewProposition() && p.getOutputs().size() == 1)
+				{
+					/**
+					 * Remove this pointless proposition from the net.
+					 */
+					Component p_input = p.getSingleInput();
+					Component p_output = p.getSingleOutput();
+
+//					GamerLogger.log("debug.log",
+//							"Removing component '" + c
+//							+ "' joining '" + p_input
+//							+ "' and '" + p_output
+//							+ "'", GamerLogger.LOG_LEVEL_IMPORTANT);
+
+					p_input.removeOutput(c);
+					c.removeInput(p_input);
+
+					p_output.removeInput(c);
+					c.removeOutput(p_output);
+
+					p_input.addOutput(p_output);
+					p_output.addInput(p_input);
+
+					to_remove.add(c);
+
+					removed_components++;
+				}
+			}
+		}
+
+		for (Component c: to_remove)
+		{
+			components.remove(c);
+		}
+
+		GamerLogger.log("debug.log",
+				"Removed "+removed_components + " during cull",
+				GamerLogger.LOG_LEVEL_IMPORTANT);
+
+		renderToFile(dot_timestamp + "_postcull.dot");
+	}
+
+	private void find_non_connected_components() {
+		/**
+		 * Starting at the terminal node, traverse the graph. Any non-visited
+		 * components are not connected and can be removed.
+		 */
+		Set<Component> visited_components = new HashSet<Component>();
+		List<Component> to_visit = new LinkedList<Component>();
+
+		/**
+		 * Find the terminal proposition.
+		 */
+		Component terminal = null;
+
+		for (Component c: components)
+		{
+			if (c instanceof Proposition)
+			{
+				Proposition p = (Proposition) c;
+				if ( p.getName() instanceof GdlProposition )
+				{
+					GdlConstant constant = ((GdlProposition) p.getName()).getName();
+					if ( constant.getValue().equals("terminal") )
+					{
+						terminal = c;
+						break;
+					}
+				}
+			}
+		}
+
+		if (terminal == null)
+		{
+			GamerLogger.log("debug.log",
+					"Error while pruning");
+			return;
+		}
+
+		to_visit.add(terminal);
+
+		while (!to_visit.isEmpty())
+		{
+			/**
+			 * Remove the top element of the list and traverse its siblings
+			 */
+			Component to_process = to_visit.get(0);
+			to_visit.remove(0);
+
+			visited_components.add(to_process);
+
+			for (Component c: to_process.getInputs())
+			{
+				if (!visited_components.contains(c))
+				{
+					to_visit.add(c);
+				}
+			}
+
+			for (Component c: to_process.getOutputs())
+			{
+				if (!visited_components.contains(c))
+				{
+					to_visit.add(c);
+				}
+			}
+		}
+
+		GamerLogger.log("debug.log",
+				"Visited " + visited_components.size() + " components out " +
+		        "of " + components.size(), GamerLogger.LOG_LEVEL_IMPORTANT);
+
+		if (visited_components.size() < components.size())
+		{
+			GamerLogger.log("debug.log", "These components are removed:"
+					, GamerLogger.LOG_LEVEL_IMPORTANT);
+
+			for (Component c: components)
+			{
+				if (!visited_components.contains(c))
+				{
+					GamerLogger.log("debug.log", "  " + c
+							, GamerLogger.LOG_LEVEL_IMPORTANT);
+				}
+			}
+
+			GamerLogger.log("debug.log",
+					        "Replacing components set with visited");
+			this.components = visited_components;
+		}
+
+		renderToFile(dot_timestamp + "_postvisit.dot");
+	}
+
+	public void addComponent(Component c)
+	{
+		components.add(c);
+		if (c instanceof Proposition) propositions.add((Proposition)c);
+	}
+
+	private void augmentComponents() {
+		for (Component c: components)
+		{
+			c.augmentBitSets(current_state, next_state);
+		}
+	}
+
+	private void setupVisitationList() {
+		ArrayList<Component> visited_components = new ArrayList<Component>();
+		depth_first_visit(visitor_root, visited_components);
+
+		topological_ordering = new ArrayList<Component>();
+
+		int topological_counter = 0;
+
+		for (int ii = visited_components.size() - 1; ii >= 0; ii--)
+		{
+			Component pc = visited_components.get(ii);
+			if (!topological_ordering.contains(pc) && (pc != visitor_root))
+			{
+				topological_ordering.add(pc);
+				pc.setTopoIndex(topological_counter);
+				topological_counter++;
+			}
+		}
+
+		if (topological_ordering.size() != components.size())
+		{
+			GamerLogger.log("debug.log", "Topological size: " + topological_ordering.size() + "; components: " + components.size() + "\n");
+
+			for (Component c: components)
+			{
+				if (!topological_ordering.contains(c))
+				{
+					GamerLogger.log("error.log", "Topo order doesn't contain " + c + "\n");
+				}
+			}
+			/* Try and carry on */
+		}
+	}
+
+	private void depth_first_visit(Component c, List<Component> viscomp)
+	{
+		/* If the child has already been visited, don't visit it again */
+		if (viscomp.contains(c))
+		{
+			return;
+		}
+
+		/* Visit the component */
+		viscomp.add(c);
+
+		/* For each child, visit that child, then add c as another visit. */
+		for (Component cc: c.getOutputs())
+		{
+			depth_first_visit(cc, viscomp);
+			viscomp.add(c);
+		}
 	}
 
 	public List<Role> getRoles()
@@ -256,7 +551,7 @@ public final class PropNet
 		sb.append("digraph propNet\n{\n");
 		for ( Component component : components )
 		{
-			sb.append("\t" + component.toString() + "\n");
+			sb.append("\t" + component.toDotFormat() + "\n");
 		}
 		sb.append("}");
 
@@ -295,13 +590,13 @@ public final class PropNet
 	{
 		Map<GdlSentence, Proposition> basePropositions = new HashMap<GdlSentence, Proposition>();
 		for (Proposition proposition : propositions) {
-		    // Skip all propositions without exactly one input.
-		    if (proposition.getInputs().size() != 1)
-		        continue;
-
-			Component component = proposition.getSingleInput();
-			if (component instanceof Transition) {
+			if (proposition.isBaseProposition())
+			{
+				/* Set the index for this proposition */
+				proposition.setIndex(compcounter);
 				basePropositions.put(proposition.getName(), proposition);
+				idx_comps.put(compcounter, proposition);
+				compcounter++;
 			}
 		}
 
@@ -372,13 +667,12 @@ public final class PropNet
 		Map<GdlSentence, Proposition> inputPropositions = new HashMap<GdlSentence, Proposition>();
 		for (Proposition proposition : propositions)
 		{
-		    // Skip all propositions that aren't GdlFunctions.
-			if (!(proposition.getName() instanceof GdlRelation))
-			    continue;
-
-			GdlRelation relation = (GdlRelation) proposition.getName();
-			if (relation.getName().getValue().equals("does")) {
+			if (proposition.isInputProposition())
+			{
+				proposition.setIndex(compcounter);
 				inputPropositions.put(proposition.getName(), proposition);
+				idx_comps.put(compcounter, proposition);
+				compcounter++;
 			}
 		}
 
@@ -450,6 +744,46 @@ public final class PropNet
 		}
 
 		return null;
+	}
+
+	private void setupRemainingIndices()
+	{
+		for ( Proposition p : propositions )
+		{
+			if (!basePropositions.containsValue(p) && !inputPropositions.containsValue(p))
+			{
+				p.setIndex(compcounter);
+				idx_comps.put(compcounter, p);
+				compcounter++;
+			}
+		}
+
+		for (Component c: components)
+		{
+			if (!(c instanceof Proposition))
+			{
+				c.setIndex(compcounter);
+				idx_comps.put(compcounter, c);
+				compcounter++;
+			}
+		}
+	}
+
+	private void setupVisitorRoot()
+	{
+		for ( Component c : components )
+		{
+			if (c.getInputs().size() == 0 && c.getOutputs().size() > 0)
+			{
+				/* GamerLogger.log("debug.log", "Adding zero input component " + c);*/
+
+				/* Add this component as an output to the visitor root */
+				visitor_root.addOutput(c);
+			}
+		}
+
+		GamerLogger.log("debug.log", "Added " +
+		                visitor_root.getOutputs().size() + " zero inputs");
 	}
 
 	public int getSize() {
@@ -548,5 +882,385 @@ public final class PropNet
 		//These are actually unnecessary...
 		//c.removeAllInputs();
 		//c.removeAllOutputs();
+	}
+
+	public MachineState getStateFromBase()
+	{
+		return new HeavensbeeMachineState(next_state);
+	}
+
+	public MachineState mark_init()
+	{
+		/* Mark the init node and propagate */
+		 SortedSet<Component> worklist = mark_things(true);
+
+		/* Now forward propagate */
+		forwardprop(worklist, false);
+
+		/* The state is this state */
+		MachineState state = getStateFromBase();
+
+		/**
+		 * Log out this initial state.
+		 */
+		/*reveal_hbstate(state);*/
+
+		return state;
+	}
+
+	public void forwardprop(SortedSet<Component> worklist, boolean tracing)
+	{
+		int workcounter = 0;
+
+		while (!worklist.isEmpty())
+		{
+			/**
+			 * Get the top item in the workset to work on.
+			 */
+			Component top_item = worklist.first();
+			worklist.remove(top_item);
+
+			if (tracing)
+			{
+				GamerLogger.log("debug.log", "Working on " + top_item +
+						    " (index " + top_item.topological_index + " ) \n");
+			}
+
+			top_item.update_and_fprop(worklist, null, tracing);
+
+			workcounter++;
+		}
+
+		if (tracing)
+		{
+			GamerLogger.log("debug.log", "Processed " + workcounter
+					                  + "items in fprop\n");
+		}
+	}
+
+	public void reveal_hbstate(MachineState state)
+	{
+		GamerLogger.log("debug.log", "Revealing state:" + state + "\n");
+		HeavensbeeMachineState hbstate = (HeavensbeeMachineState)state;
+		BitSet bs = hbstate.get_bs();
+		for (int i = bs.nextSetBit(0); i >= 0; i = bs.nextSetBit(i+1))
+		{
+			Component c = idx_comps.get(i);
+			GamerLogger.log("debug.log", "  Component " + c + "\n");
+		}
+	}
+
+	public void check_transitions()
+	{
+		for (Component c: getComponents())
+		{
+			if (c instanceof Transition)
+			{
+				check_transition((Transition)c, 0);
+			}
+		}
+	}
+
+	public void check_legal_props(Role r)
+	{
+		for (Proposition p: getLegalPropositions().get(r))
+		{
+			check_component(p, 0);
+		}
+	}
+
+	private void check_transition(Transition c, int indent) {
+		// Iterate back up the tree to see what the values for these transitions are.
+		String strindent = c.makeindent(indent);
+
+//		GamerLogger.emitToConsole(strindent + c + ": " + c.getValue() + " (transition is for " + c.getSingleOutput() + ")\n");
+//		for (Component cc: c.getInputs())
+//		{
+//			check_component(cc, indent + 2);
+//		}
+		GamerLogger.log("debug.log", strindent + c + ": " + c.getSingleInput().getValue()
+				+ "; target = " + next_state.get(c.getSingleOutput().index) + " = " + c.getSingleOutput() +  "\n");
+		if (c.getSingleInput().getValue())
+		{
+			for (Component cc: c.getInputs())
+			{
+				check_component(cc, indent + 2);
+			}
+		}
+	}
+
+	private void check_component(Component c, int indent) {
+		String strindent = c.makeindent(indent);
+
+		GamerLogger.log("debug.log", strindent + c + ": " + c.getValue() + "\n");
+		for (Component cc: c.getInputs())
+		{
+			if (! (cc instanceof Transition))
+			{
+				check_component(cc, indent + 2);
+			}
+		}
+	}
+
+	public void initial_propagate()
+	{
+		GamerLogger.log("debug.log", "Starting initial propagation\n");
+
+		/**
+		 * Start the initial propagation by updating and propping all Nots
+		 * and Constants; this adds their values to the blank state but
+		 * doesn't propagate.  This state is the "pristine" state; we
+		 * revert to this when working out next values, before propagating.
+		 */
+		SortedSet<Component> worklist = getnewWorklist();
+
+		for (Component c: getComponents())
+		{
+			if (c instanceof Not || c instanceof Constant)
+			{
+				c.update_and_fprop(worklist, null, true);
+			}
+		}
+
+		GamerLogger.log("debug.log", "After initial update, the following states were set\n");
+		GamerLogger.log("debug.log", current_state.toString());
+
+		/**
+		 * Save off the pristine state
+		 */
+		pristine_state = (BitSet) current_state.clone();
+
+		GamerLogger.log("debug.log", "The pristine state is as follows\n");
+		for (int i = pristine_state.nextSetBit(0); i >= 0; i = pristine_state.nextSetBit(i+1))
+		{
+			Component c = idx_comps.get(i);
+			GamerLogger.log("debug.log", "  Component " + c + "\n");
+		}
+
+		/* Now forward propagate */
+		GamerLogger.log("debug.log", "Now forward propping\n");
+		forwardprop(worklist, true);
+		GamerLogger.log("debug.log", "Ending initial propagation\n");
+	}
+
+	public SortedSet<Component> getnewWorklist()
+	{
+		Comparator<Component> compy = new TopologicalComparator();
+		SortedSet<Component> wl = new TreeSet<Component>(compy);
+		return wl;
+	}
+
+	/**
+	 * This function marks base propositions, and clears any inputs and the
+	 * init proposition.
+	 * @param state
+	 */
+	private BitSet get_bitset_from_state(MachineState state)
+	{
+		if (!(state instanceof HeavensbeeMachineState))
+		{
+			throw new RuntimeException(
+					                 "State is not a Heavensbee MachineState");
+		}
+
+		HeavensbeeMachineState hbstate = (HeavensbeeMachineState)state;
+		BitSet bs = hbstate.get_bs();
+		return bs;
+	}
+
+	public SortedSet<Component> mark_things(MachineState state)
+	{
+		return mark_things(state, null);
+	}
+
+
+	public SortedSet<Component> mark_things(MachineState state,
+											 List<GdlSentence> doeses)
+	{
+		return mark_things(state, doeses, false);
+	}
+
+	public SortedSet<Component> mark_things(boolean mark_init)
+	{
+	return mark_things(null, null, mark_init);
+	}
+
+	public SortedSet<Component> mark_things(MachineState state,
+			                                List<GdlSentence> doeses,
+			                                boolean mark_init)
+	{
+		/**
+		 * Copy the pristine state that we have to our target
+		 */
+		BitSet target_state = (BitSet) pristine_state.clone();
+
+		//GamerLogger.emitToConsole("Target State " + target_state + "\n");
+
+		if (state != null)
+		{
+			/**
+			 * Get the bitset from the machine state with the bases.
+			 */
+			BitSet base_set = get_bitset_from_state(state);
+			//GamerLogger.emitToConsole("Base set " + base_set + "\n");
+			//reveal_hbstate(state);
+
+			/**
+			 * Apply the base set to the target state.  This sets the base props
+			 */
+			target_state.or(base_set);
+
+			//GamerLogger.emitToConsole("Target State w/ base " + target_state + "\n");
+		}
+
+		if (doeses != null)
+		{
+			/**
+			 * There's GDL things to do
+			 */
+			for (GdlSentence smove: doeses)
+			{
+				Proposition p = getInputPropositions().get(smove);
+				//GamerLogger.emitToConsole("Setting input bit " + p.index + "\n");
+
+				if (p != null)
+				{
+					target_state.set(p.index);
+				}
+				else
+				{
+					/**
+					 * If p was null, then we removed the input proposition
+					 * for having no effect on the propnet; so actually there's
+					 * no point in setting the bit.
+					 */
+//					GamerLogger.log("debug.log", "Ignoring irrelevant move "
+//					 + smove);
+				}
+			}
+		}
+
+		if (mark_init)
+		{
+			Proposition ip = getInitProposition();
+			//GamerLogger.emitToConsole("Setting init bit " + ip.index + "\n");
+			target_state.set(ip.index);
+		}
+
+		/**
+		 * Now, take our target state, copy it, and xor it with our current
+		 * state, to get a list of differing states.
+		 */
+		//GamerLogger.emitToConsole("Current State " + current_state + "\n");
+
+
+		BitSet differing_bits = (BitSet) target_state.clone();
+		differing_bits.xor(current_state);
+
+		//GamerLogger.emitToConsole("Differing bits " + differing_bits + "\n");
+
+		/**
+		 * Ok, now override the current state, and add any different
+		 * states to a work list to update those states.
+		 */
+		current_state = target_state;
+
+		SortedSet<Component> worklist = getnewWorklist();
+
+		for (int i = differing_bits.nextSetBit(0);
+			 i >= 0;
+			 i = differing_bits.nextSetBit(i+1))
+		{
+			Component c = idx_comps.get(i);
+
+			/**
+			 * If this component is a proposition, we need to set the value
+			 * we think it should be in here.  This only affects base props?
+			 */
+			if (c instanceof Proposition)
+			{
+				Proposition p = (Proposition) c;
+				boolean p_value = target_state.get(i);
+
+//				GamerLogger.emitToConsole(
+//					"  Component "+c+" is proposition " + p
+//					+ "; setting to " + p_value + "\n");
+				p.setValue(p_value);
+			}
+
+//			GamerLogger.emitToConsole("  Adding component " + i +
+//					                  " " + c + " to worklist \n");
+			worklist.add(c);
+		}
+
+		return worklist;
+	}
+
+	public void cache_marked_bases(MachineState state)
+	{
+		if (!(state instanceof HeavensbeeMachineState))
+		{
+			throw new RuntimeException(
+					                 "State is not a Heavensbee MachineState");
+		}
+
+		HeavensbeeMachineState hbstate = (HeavensbeeMachineState)state;
+
+		if (!hbstate.is_cached())
+		{
+//			GamerLogger.emitToConsole("After forward propping, we ended up in this current state\n");
+//			for (int i = current_state.nextSetBit(0); i >= 0; i = current_state.nextSetBit(i+1))
+//			{
+//				Component c = idx_comps.get(i);
+//				GamerLogger.emitToConsole("  Component " + c + "\n");
+//			}
+//
+//			GamerLogger.emitToConsole("After forward propping, we ended up in this next state\n");
+//			for (int i = next_state.nextSetBit(0); i >= 0; i = next_state.nextSetBit(i+1))
+//			{
+//				Component c = idx_comps.get(i);
+//				GamerLogger.emitToConsole("  Component " + c + "\n");
+//			}
+//
+//			GamerLogger.emitToConsole("Checking our transitions\n");
+//			check_transitions();
+//
+//			GamerLogger.emitToConsole("\n\n\n");
+
+			hbstate.set_cache(current_state, next_state);
+		}
+		else
+		{
+			hbstate.check_cache(current_state, next_state);
+			//throw new RuntimeException("Didn't need to redo this");
+		}
+	}
+
+	public boolean use_cache_if_there(MachineState state)
+	{
+		return false;
+
+//		if (!(state instanceof HeavensbeeMachineState))
+//		{
+//			throw new RuntimeException(
+//					                 "State is not a Heavensbee MachineState");
+//		}
+//
+//		HeavensbeeMachineState hbstate = (HeavensbeeMachineState)state;
+//
+//		boolean retval;
+//
+//		if (hbstate.is_cached())
+//		{
+//			retval = true;
+//			current_state = (BitSet) hbstate.get_current_cache().clone();
+//			next_state = (BitSet) hbstate.get_next_cache().clone();
+//		}
+//		else
+//		{
+//			retval = false;
+//		}
+//
+//		return retval;
 	}
 }

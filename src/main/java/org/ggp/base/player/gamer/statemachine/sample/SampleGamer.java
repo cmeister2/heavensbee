@@ -53,8 +53,6 @@ public abstract class SampleGamer extends StateMachineGamer
 		return new SimpleDetailPanel();
 	}
 
-
-
 	@Override
 	public void stateMachineStop() {
 		// Sample gamers do no special cleanup when the match ends normally.

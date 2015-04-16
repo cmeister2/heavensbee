@@ -1,5 +1,9 @@
 package org.ggp.base.util.propnet.architecture.components;
 
+import java.util.BitSet;
+import java.util.Set;
+
+import org.ggp.base.util.logging.GamerLogger;
 import org.ggp.base.util.propnet.architecture.Component;
 
 /**
@@ -30,7 +34,7 @@ public final class Constant extends Component
 	@Override
 	public boolean getValue()
 	{
-		return value;
+		return this.value;
 	}
 
 	/**
@@ -39,6 +43,53 @@ public final class Constant extends Component
 	@Override
 	public String toString()
 	{
-		return toDot("doublecircle", "grey", Boolean.toString(value).toUpperCase());
+		//return toDot("doublecircle", "grey", Boolean.toString(value).toUpperCase());
+		return Boolean.toString(value).toUpperCase() + " " + hashCode();
+	}
+
+	@Override
+	public void printTree(int indent) {
+		GamerLogger.emitToConsole(makeindent(indent) + "Constant " + this.hashCode() + " " + this.getValue() + "\n");
+	}
+
+	@Override
+	public void augmentBitSets(BitSet current_state, BitSet next_state) {
+		curstate = current_state;
+	}
+
+	@Override
+	public void update_and_fprop(Set<Component> worklist, Set<Component> checkset, boolean tracing)
+	{
+		if (this.value != curstate.get(index))
+		{
+			if (tracing)
+			{
+				GamerLogger.emitToConsole("Marking and propping " + this + " to " + this.value + "\n");
+			}
+
+			curstate.set(index, this.value);
+			for (Component c: getOutputs())
+			{
+				if (checkset != null && checkset.contains(c))
+				{
+					GamerLogger.emitToConsole("!!! Component " + c + " is already in the checked set and isn't set \n");
+					//throw new RuntimeException();
+				}
+				if (tracing)
+				{
+					GamerLogger.emitToConsole("Adding '" + c.toString() + "' to worklist \n");
+				}
+				worklist.add(c);
+			}
+		}
+		else if (tracing)
+		{
+			GamerLogger.emitToConsole("Already propped " + this + " \n");
+		}
+	}
+
+	@Override
+	public String toDotFormat() {
+		return helptoDot("doublecircle", "grey", Boolean.toString(value).toUpperCase());
 	}
 }

@@ -14,6 +14,7 @@ import org.ggp.base.util.gdl.grammar.GdlSentence;
 import org.ggp.base.util.gdl.grammar.GdlTerm;
 import org.ggp.base.util.statemachine.exceptions.GoalDefinitionException;
 import org.ggp.base.util.statemachine.exceptions.MoveDefinitionException;
+import org.ggp.base.util.statemachine.exceptions.TimeToGetMovingException;
 import org.ggp.base.util.statemachine.exceptions.TransitionDefinitionException;
 
 import com.google.common.collect.ImmutableMap;
@@ -395,5 +396,25 @@ public abstract class StateMachine
     	for (int j = 0; j < avgScores.length; j++) {
     		avgScores[j] /= repetitions;
     	}
+    }
+	public MachineState performTimedDepthCharge(MachineState state, final int[] theDepth, long timeout)
+			throws TransitionDefinitionException, MoveDefinitionException, TimeToGetMovingException {
+        int nDepth = 0;
+        long now;
+        while(!isTerminal(state))
+        {
+        	now = System.currentTimeMillis();
+
+        	if (now > timeout)
+        	{
+        		throw new TimeToGetMovingException(state);
+        	}
+
+            nDepth++;
+            state = getNextStateDestructively(state, getRandomJointMove(state));
+        }
+        if(theDepth != null)
+            theDepth[0] = nDepth;
+        return state;
     }
 }

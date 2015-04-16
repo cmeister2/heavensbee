@@ -50,7 +50,6 @@ public final class Player extends JPanel
 	public static void main(String[] args) throws IOException
 	{
 	    NativeUI.setNativeUI();
-
 	    final Player playerPanel = new Player();
 	    javax.swing.SwingUtilities.invokeLater(new Runnable()
 	    {
