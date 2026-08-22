@@ -153,5 +153,5 @@ task gameServerRunner(type: JavaExec) {
 
 // This was used to generate the Gradle wrapper.
 task wrapper(type: Wrapper) {
-    gradleVersion = '2.1'
+    gradleVersion = '9.7.1'
 }
